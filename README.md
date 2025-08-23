@@ -50,5 +50,32 @@ Visit http://localhost:8000/docs for API documentation.
 - **Monitoring**: Portfolio tracking
 - **Research**: Market data collection
 
+## 🔌 WebSocket Real-time Streaming
+
+### Connect to WebSocket Server
+```javascript
+const ws = new WebSocket('ws://localhost:8765');
+
+// Subscribe to symbols
+ws.send(JSON.stringify({
+  symbols: ['AAPL', 'GOOGL', 'MSFT'],
+  data_types: ['tick', 'quote'],
+  frequency: '1s'
+}));
+
+// Receive real-time data
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  console.log('Received:', data);
+};
+```
+
+### Multiple Data Sources
+- **Alpha Vantage**: Real-time quotes and historical data
+- **Polygon.io**: Professional-grade market data
+- **Finnhub**: Financial news and company data
+- **FRED**: Economic indicators and macro data
+- **Yahoo Finance**: Backup data source
+
 ---
 Created by [olaitanojo](https://github.com/olaitanojo)
