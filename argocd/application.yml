@@ -1,0 +1,904 @@
+# ArgoCD Application Configurations for Additional Key Projects
+# Implements Rolling Update strategies with advanced monitoring and validation
+# Covers remaining repositories with comprehensive GitOps deployment
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: market-data-api
+  namespace: argocd
+  labels:
+    app: market-data-api
+    env: production
+    tier: data
+    component: api
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: data-deployments
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: data-deployments
+    notifications.argoproj.io/subscribe.on-health-degraded.pagerduty: data-team
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: data-services
+  
+  # Source Configuration
+  source:
+    repoURL: https://github.com/olaitanojo/Market-data-api.git
+    targetRevision: HEAD
+    path: k8s/overlays/production
+    
+    # Kustomize Configuration
+    kustomize:
+      namePrefix: market-data-
+      nameSuffix: -prod
+      commonLabels:
+        app: market-data-api
+        env: production
+        managed-by: argocd
+      
+      # Image tag substitution from CI/CD
+      images:
+        - name: marketdataregistry.azurecr.io/market-data-api
+          newTag: latest
+      
+      # Patches for environment-specific configurations
+      patches:
+        - target:
+            group: apps
+            version: v1
+            kind: Deployment
+            name: market-data-api
+          patch: |-
+            - op: replace
+              path: /spec/replicas
+              value: 3
+            - op: replace
+              path: /spec/template/spec/containers/0/resources/limits/memory
+              value: "1Gi"
+            - op: replace
+              path: /spec/template/spec/containers/0/resources/limits/cpu
+              value: "600m"
+      
+      # Replica overrides for production
+      replicas:
+        - name: market-data-api
+          count: 3
+        - name: market-data-processor
+          count: 2
+
+  # Destination Configuration
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: market-data-prod
+    
+  # Sync Policy Configuration
+  syncPolicy:
+    # Automated sync with self-healing
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    
+    # Sync options
+    syncOptions:
+      - Validate=false
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true
+    
+    # Retry configuration
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Revision History
+  revisionHistoryLimit: 10
+
+---
+# ArgoCD Application for Trading Strategy Backtester
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: trading-strategy-backtester
+  namespace: argocd
+  labels:
+    app: trading-strategy-backtester
+    env: production
+    tier: analytics
+    component: backtester
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: analytics-deployments
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: analytics-deployments
+    notifications.argoproj.io/subscribe.on-health-degraded.pagerduty: analytics-team
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: data-services
+  
+  # Source Configuration
+  source:
+    repoURL: https://github.com/olaitanojo/Trading-strategy-backtester.git
+    targetRevision: HEAD
+    path: k8s/overlays/production
+    
+    # Kustomize Configuration
+    kustomize:
+      namePrefix: backtester-
+      nameSuffix: -prod
+      commonLabels:
+        app: trading-strategy-backtester
+        env: production
+        managed-by: argocd
+      
+      # Image tag substitution from CI/CD
+      images:
+        - name: backtesterregistry.azurecr.io/trading-strategy-backtester
+          newTag: latest
+      
+      # Patches for environment-specific configurations
+      patches:
+        - target:
+            group: apps
+            version: v1
+            kind: Deployment
+            name: trading-strategy-backtester
+          patch: |-
+            - op: replace
+              path: /spec/replicas
+              value: 2
+            - op: replace
+              path: /spec/template/spec/containers/0/resources/limits/memory
+              value: "2Gi"
+            - op: replace
+              path: /spec/template/spec/containers/0/resources/limits/cpu
+              value: "1000m"
+
+  # Destination Configuration
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: backtester-prod
+    
+  # Sync Policy Configuration
+  syncPolicy:
+    # Automated sync with self-healing
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    
+    # Sync options
+    syncOptions:
+      - Validate=false
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    
+    # Retry configuration
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Revision History
+  revisionHistoryLimit: 10
+
+---
+# ArgoCD Application for Payment Gateway API
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: payment-gateway-api
+  namespace: argocd
+  labels:
+    app: payment-gateway-api
+    env: production
+    tier: payment
+    component: gateway
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: payment-deployments
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: payment-deployments
+    notifications.argoproj.io/subscribe.on-health-degraded.pagerduty: payment-team
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: payment-services
+  
+  # Source Configuration
+  source:
+    repoURL: https://github.com/olaitanojo/Payment-gateway-api.git
+    targetRevision: HEAD
+    path: k8s/overlays/production
+    
+    # Kustomize Configuration
+    kustomize:
+      namePrefix: payment-gateway-
+      nameSuffix: -prod
+      commonLabels:
+        app: payment-gateway-api
+        env: production
+        managed-by: argocd
+      
+      # Image tag substitution from CI/CD
+      images:
+        - name: paymentgatewayregistry.azurecr.io/payment-gateway-api
+          newTag: latest
+
+  # Destination Configuration
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: payment-gateway-prod
+    
+  # Sync Policy Configuration
+  syncPolicy:
+    # Manual sync for payment systems (critical)
+    automated:
+      prune: false
+      selfHeal: false
+      allowEmpty: false
+    
+    # Sync options
+    syncOptions:
+      - Validate=true
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    
+    # Retry configuration
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+
+  # Revision History
+  revisionHistoryLimit: 15
+
+---
+# ArgoCD Application for Azure Kubernetes Cluster
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: azure-kubernetes-cluster
+  namespace: argocd
+  labels:
+    app: azure-kubernetes-cluster
+    env: production
+    tier: infrastructure
+    component: cluster
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: cluster-deployments
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: cluster-deployments
+    notifications.argoproj.io/subscribe.on-health-degraded.pagerduty: platform-team
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: infrastructure
+  
+  # Source Configuration
+  source:
+    repoURL: https://github.com/olaitanojo/Azure-kubernetes-cluster.git
+    targetRevision: HEAD
+    path: cluster-config/production
+    
+    # Kustomize Configuration
+    kustomize:
+      namePrefix: aks-
+      nameSuffix: -prod
+      commonLabels:
+        app: azure-kubernetes-cluster
+        env: production
+        managed-by: argocd
+
+  # Destination Configuration
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+    
+  # Sync Policy Configuration
+  syncPolicy:
+    # Manual sync for cluster configuration
+    automated:
+      prune: false
+      selfHeal: false
+      allowEmpty: false
+    
+    # Sync options
+    syncOptions:
+      - Validate=true
+      - CreateNamespace=false
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      - ServerSideApply=true
+    
+    # Retry configuration
+    retry:
+      limit: 3
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 10m
+
+  # Revision History
+  revisionHistoryLimit: 5
+
+---
+# ArgoCD AppProject for Data Services
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: data-services
+  namespace: argocd
+  labels:
+    project: data-services
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  description: "Data Services Applications with Advanced Deployment Strategies"
+  
+  # Source repositories allowed for this project
+  sourceRepos:
+    - 'https://github.com/olaitanojo/Market-data-api.git'
+    - 'https://github.com/olaitanojo/Trading-strategy-backtester.git'
+    - 'https://github.com/olaitanojo/Crypto-trading-bot.git'
+    - 'https://charts.bitnami.com/bitnami'
+    - 'https://prometheus-community.github.io/helm-charts'
+  
+  # Destination clusters and namespaces
+  destinations:
+    - namespace: 'market-data-*'
+      server: https://kubernetes.default.svc
+    - namespace: 'backtester-*'
+      server: https://kubernetes.default.svc
+    - namespace: 'crypto-*'
+      server: https://kubernetes.default.svc
+    - namespace: 'monitoring'
+      server: https://kubernetes.default.svc
+  
+  # Cluster resource whitelist
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+  
+  # Namespace resource whitelist
+  namespaceResourceWhitelist:
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Secret
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: ''
+      kind: PersistentVolumeClaim
+    - group: apps
+      kind: Deployment
+    - group: apps
+      kind: StatefulSet
+    - group: apps
+      kind: ReplicaSet
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: argoproj.io
+      kind: Rollout
+    - group: argoproj.io
+      kind: AnalysisTemplate
+    - group: argoproj.io
+      kind: AnalysisRun
+    - group: monitoring.coreos.com
+      kind: ServiceMonitor
+    - group: monitoring.coreos.com
+      kind: PrometheusRule
+
+  # RBAC roles for this project
+  roles:
+    - name: admin
+      description: "Admin access to Data Services applications"
+      policies:
+        - p, proj:data-services:admin, applications, *, data-services/*, allow
+        - p, proj:data-services:admin, repositories, *, *, allow
+        - p, proj:data-services:admin, logs, get, data-services/*, allow
+      groups:
+        - data-team
+        - analytics-team
+    
+    - name: developer
+      description: "Developer access to Data Services applications"
+      policies:
+        - p, proj:data-services:developer, applications, get, data-services/*, allow
+        - p, proj:data-services:developer, applications, sync, data-services/*, allow
+        - p, proj:data-services:developer, repositories, get, *, allow
+        - p, proj:data-services:developer, logs, get, data-services/*, allow
+      groups:
+        - data-developers
+        - analytics-developers
+    
+    - name: readonly
+      description: "Read-only access to Data Services applications"
+      policies:
+        - p, proj:data-services:readonly, applications, get, data-services/*, allow
+        - p, proj:data-services:readonly, repositories, get, *, allow
+        - p, proj:data-services:readonly, logs, get, data-services/*, allow
+      groups:
+        - data-viewers
+
+---
+# ArgoCD AppProject for Payment Services
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: payment-services
+  namespace: argocd
+  labels:
+    project: payment-services
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  description: "Payment Services Applications with Strict Security and Compliance"
+  
+  # Source repositories allowed for this project
+  sourceRepos:
+    - 'https://github.com/olaitanojo/Payment-gateway-api.git'
+    - 'https://github.com/olaitanojo/Naira-remit-node.js-app.git'
+    - 'https://charts.bitnami.com/bitnami'
+    - 'https://prometheus-community.github.io/helm-charts'
+  
+  # Destination clusters and namespaces
+  destinations:
+    - namespace: 'payment-gateway-*'
+      server: https://kubernetes.default.svc
+    - namespace: 'naira-remit-*'
+      server: https://kubernetes.default.svc
+    - namespace: 'monitoring'
+      server: https://kubernetes.default.svc
+  
+  # Cluster resource whitelist
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+  
+  # Namespace resource whitelist
+  namespaceResourceWhitelist:
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Secret
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: ''
+      kind: PersistentVolumeClaim
+    - group: apps
+      kind: Deployment
+    - group: apps
+      kind: StatefulSet
+    - group: apps
+      kind: ReplicaSet
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: argoproj.io
+      kind: Rollout
+    - group: argoproj.io
+      kind: AnalysisTemplate
+    - group: argoproj.io
+      kind: AnalysisRun
+    - group: monitoring.coreos.com
+      kind: ServiceMonitor
+    - group: monitoring.coreos.com
+      kind: PrometheusRule
+
+  # RBAC roles for this project (more restrictive for payments)
+  roles:
+    - name: admin
+      description: "Admin access to Payment Services applications"
+      policies:
+        - p, proj:payment-services:admin, applications, *, payment-services/*, allow
+        - p, proj:payment-services:admin, repositories, get, *, allow
+        - p, proj:payment-services:admin, logs, get, payment-services/*, allow
+      groups:
+        - payment-team
+        - fintech-team
+    
+    - name: developer
+      description: "Developer access to Payment Services applications"
+      policies:
+        - p, proj:payment-services:developer, applications, get, payment-services/*, allow
+        - p, proj:payment-services:developer, repositories, get, *, allow
+        - p, proj:payment-services:developer, logs, get, payment-services/*, allow
+      groups:
+        - payment-developers
+    
+    - name: readonly
+      description: "Read-only access to Payment Services applications"
+      policies:
+        - p, proj:payment-services:readonly, applications, get, payment-services/*, allow
+        - p, proj:payment-services:readonly, repositories, get, *, allow
+        - p, proj:payment-services:readonly, logs, get, payment-services/*, allow
+      groups:
+        - payment-viewers
+        - compliance-team
+
+  # Very strict sync windows for payment services
+  syncWindows:
+    - kind: allow
+      schedule: '0 10-14 * * 2-4'  # Tue-Thu, 10AM-2PM only
+      duration: 4h
+      applications:
+        - '*'
+      manualSync: true
+    - kind: deny
+      schedule: '0 0-23 * * 1,5,6,0'  # Mon, Fri, Weekends
+      duration: 24h
+      applications:
+        - '*'
+      manualSync: false
+
+---
+# Argo Rollout Configuration for Market Data API (Rolling Update)
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: market-data-api
+  namespace: market-data-prod
+  labels:
+    app: market-data-api
+    env: production
+    tier: data
+  annotations:
+    rollout.argoproj.io/revision: "1"
+spec:
+  replicas: 3
+  
+  # Rolling update strategy
+  strategy:
+    canary:
+      maxSurge: "34%"       # 1 additional pod
+      maxUnavailable: "33%" # 1 pod can be unavailable
+      
+      # Canary deployment steps
+      steps:
+        # Step 1: Deploy 33% traffic to canary
+        - setWeight: 33
+        - pause:
+            duration: 5m
+        
+        # Step 2: Run basic health checks
+        - analysis:
+            templates:
+              - templateName: rolling-success-rate
+              - templateName: rolling-latency-check
+            args:
+              - name: service-name
+                value: market-data-api-canary
+              - name: namespace
+                value: market-data-prod
+        
+        # Step 3: Increase to 66% traffic
+        - setWeight: 66
+        - pause:
+            duration: 5m
+        
+        # Step 4: Final validation before full rollout
+        - analysis:
+            templates:
+              - templateName: rolling-success-rate
+              - templateName: data-quality-check
+            args:
+              - name: service-name
+                value: market-data-api-canary
+              - name: namespace
+                value: market-data-prod
+        
+        # Step 5: Full rollout
+        - setWeight: 100
+  
+  # Rollout selector
+  selector:
+    matchLabels:
+      app: market-data-api
+      tier: data
+  
+  # Pod template
+  template:
+    metadata:
+      labels:
+        app: market-data-api
+        tier: data
+        env: production
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      
+      # Service account
+      serviceAccountName: market-data-api
+      
+      # Node selection
+      nodeSelector:
+        workload: data
+      
+      # Main containers
+      containers:
+        - name: market-data-api
+          image: marketdataregistry.azurecr.io/market-data-api:latest
+          
+          # Container ports
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          
+          # Environment variables
+          env:
+            - name: ENVIRONMENT
+              value: "production"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: redis-url
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: api-keys
+          
+          # Resource limits and requests
+          resources:
+            limits:
+              cpu: 600m
+              memory: 1Gi
+            requests:
+              cpu: 300m
+              memory: 512Mi
+          
+          # Health checks
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          
+          # Security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1001
+      
+      # DNS configuration
+      dnsPolicy: ClusterFirst
+      terminationGracePeriodSeconds: 30
+
+---
+# Analysis Templates for Rolling Updates
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: rolling-success-rate
+  namespace: market-data-prod
+  labels:
+    app: market-data-api
+spec:
+  metrics:
+    - name: rolling-success-rate
+      initialDelay: 30s
+      interval: 30s
+      count: 5
+      successCondition: result[0] >= 0.95
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            sum(rate(http_requests_total{service="{{args.service-name}}", status!~"5.."}[1m])) / 
+            sum(rate(http_requests_total{service="{{args.service-name}}"}[1m]))
+  args:
+    - name: service-name
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: rolling-latency-check
+  namespace: market-data-prod
+  labels:
+    app: market-data-api
+spec:
+  metrics:
+    - name: rolling-latency-p95
+      initialDelay: 30s
+      interval: 30s
+      count: 5
+      successCondition: result[0] <= 500
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            histogram_quantile(0.95, 
+              sum(rate(http_request_duration_seconds_bucket{service="{{args.service-name}}"}[1m])) by (le)
+            ) * 1000
+  args:
+    - name: service-name
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: data-quality-check
+  namespace: market-data-prod
+  labels:
+    app: market-data-api
+spec:
+  metrics:
+    - name: data-freshness
+      initialDelay: 60s
+      interval: 60s
+      count: 3
+      successCondition: result[0] <= 300  # Data should be fresh within 5 minutes
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            time() - max(market_data_last_update_timestamp{service="{{args.service-name}}"})
+    
+    - name: data-completeness
+      initialDelay: 60s
+      interval: 60s
+      count: 3
+      successCondition: result[0] >= 0.98
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            sum(market_data_symbols_available{service="{{args.service-name}}"}) / 
+            sum(market_data_symbols_expected{service="{{args.service-name}}"})
+  args:
+    - name: service-name
+    - name: namespace
+
+---
+# ArgoCD ApplicationSet for Multi-Environment App Deployment
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: multi-env-applications
+  namespace: argocd
+  labels:
+    app: multi-env-applications
+spec:
+  generators:
+    - matrix:
+        generators:
+          - list:
+              elements:
+                - app: market-data-api
+                  project: data-services
+                  repo: Market-data-api
+                  namespace: market-data
+                - app: trading-strategy-backtester
+                  project: data-services
+                  repo: Trading-strategy-backtester
+                  namespace: backtester
+                - app: payment-gateway-api
+                  project: payment-services
+                  repo: Payment-gateway-api
+                  namespace: payment-gateway
+          - list:
+              elements:
+                - environment: development
+                  revision: develop
+                  syncPolicy: automated
+                  replicas: 1
+                - environment: staging
+                  revision: staging
+                  syncPolicy: manual
+                  replicas: 2
+                - environment: production
+                  revision: main
+                  syncPolicy: manual
+                  replicas: 3
+  
+  template:
+    metadata:
+      name: '{{app}}-{{environment}}'
+      labels:
+        app: '{{app}}'
+        env: '{{environment}}'
+      annotations:
+        argocd.argoproj.io/sync-wave: "2"
+    spec:
+      project: '{{project}}'
+      source:
+        repoURL: 'https://github.com/olaitanojo/{{repo}}.git'
+        targetRevision: '{{revision}}'
+        path: 'k8s/overlays/{{environment}}'
+        kustomize:
+          namePrefix: '{{app}}-'
+          nameSuffix: '-{{environment}}'
+          commonLabels:
+            app: '{{app}}'
+            env: '{{environment}}'
+            managed-by: argocd
+          replicas:
+            - name: '{{app}}'
+              count: '{{replicas}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{namespace}}-{{environment}}'
+      syncPolicy:
+        automated:
+          prune: '{{#if (eq syncPolicy "automated")}}true{{else}}false{{/if}}'
+          selfHeal: '{{#if (eq syncPolicy "automated")}}true{{else}}false{{/if}}'
+        syncOptions:
+          - CreateNamespace=true
+          - Validate=false
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m

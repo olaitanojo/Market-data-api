@@ -1,0 +1,485 @@
+# Azure DevOps Pipeline for SPX Options Trading Bot
+# Advanced Deployment Strategies: Blue-Green, Canary, Rolling Updates, Feature Flags, Multi-Environment
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - feature/*
+  paths:
+    exclude:
+      - README.md
+      - docs/*
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+variables:
+  - group: spx-options-prod-secrets
+  - group: spx-options-staging-secrets
+  - name: pythonVersion
+    value: '3.11'
+  - name: containerRegistry
+    value: 'spxoptionsregistry.azurecr.io'
+  - name: imageName
+    value: 'spx-options-trading-bot'
+  - name: kubernetesServiceConnection
+    value: 'k8s-connection'
+  - name: featureFlagService
+    value: 'https://feature-flags.spxoptions.com'
+
+stages:
+  - stage: Build
+    displayName: 'Build and Security Scan'
+    jobs:
+      - job: BuildTest
+        displayName: 'Build, Test & Security Analysis'
+        pool:
+          vmImage: 'ubuntu-latest'
+        
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              displayName: 'Use Python $(pythonVersion)'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+              pip install pytest-cov black flake8 mypy safety bandit pytest-xdist
+            displayName: 'Install dependencies'
+
+          - script: |
+              black --check .
+              flake8 . --max-line-length=88 --extend-ignore=E203,W503
+              mypy . --ignore-missing-imports
+            displayName: 'Code quality checks'
+
+          - script: |
+              safety check --json --output safety-report.json
+              bandit -r . -f json -o bandit-report.json -ll
+            displayName: 'Security vulnerability scanning'
+
+          - script: |
+              python -m pytest tests/ --cov=. --cov-report=xml --cov-report=html --junitxml=test-results.xml -n auto
+            displayName: 'Run parallel tests with coverage'
+
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFiles: 'test-results.xml'
+              testRunTitle: 'SPX Options Trading Bot Tests'
+
+          - task: PublishCodeCoverageResults@1
+            inputs:
+              codeCoverageTool: 'Cobertura'
+              summaryFileLocation: 'coverage.xml'
+
+          - task: Docker@2
+            displayName: 'Build multi-stage Docker image'
+            inputs:
+              containerRegistry: '$(containerRegistry)'
+              repository: '$(imageName)'
+              command: 'build'
+              Dockerfile: 'Dockerfile.multi-stage'
+              tags: |
+                $(Build.BuildId)
+                $(Build.SourceBranchName)-$(Build.BuildId)
+                latest
+              arguments: |
+                --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+                --build-arg VCS_REF=$(Build.SourceVersion)
+                --build-arg VERSION=$(Build.BuildId)
+
+          - task: AquaSec@1
+            displayName: 'Container security scan'
+            inputs:
+              image: '$(containerRegistry)/$(imageName):$(Build.BuildId)'
+              scanner: 'Trivy'
+
+          - task: Docker@2
+            displayName: 'Push Docker image'
+            inputs:
+              containerRegistry: '$(containerRegistry)'
+              repository: '$(imageName)'
+              command: 'push'
+              tags: |
+                $(Build.BuildId)
+                $(Build.SourceBranchName)-$(Build.BuildId)
+                latest
+
+  - stage: DeployDev
+    displayName: 'Deploy to Development'
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - deployment: DeployToDev
+        displayName: 'Rolling Update Deployment to Dev'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'spx-options-dev'
+        strategy:
+          rolling:
+            maxParallel: 2
+            preDeploy:
+              steps:
+                - script: |
+                    echo "Pre-deployment health checks for dev environment"
+                    python scripts/pre_deployment_checks.py --environment dev
+                  displayName: 'Pre-deployment validation'
+            deploy:
+              steps:
+                - task: KubernetesManifest@0
+                  displayName: 'Deploy with rolling update strategy'
+                  inputs:
+                    action: 'deploy'
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'spx-options-dev'
+                    manifests: |
+                      k8s/dev/deployment.yaml
+                      k8s/dev/service.yaml
+                      k8s/dev/configmap.yaml
+                      k8s/dev/secrets.yaml
+                    containers: '$(containerRegistry)/$(imageName):$(Build.BuildId)'
+                    
+                - task: Kubernetes@1
+                  displayName: 'Wait for rollout completion'
+                  inputs:
+                    connectionType: 'kubernetesServiceConnection'
+                    kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+                    namespace: 'spx-options-dev'
+                    command: 'rollout'
+                    arguments: 'status deployment/spx-options-trading-bot --timeout=300s'
+
+            postRouteTraffic:
+              steps:
+                - script: |
+                    python scripts/post_deployment_tests.py --environment dev --endpoint http://spx-options-dev.internal
+                  displayName: 'Post-deployment smoke tests'
+
+  - stage: DeployStaging
+    displayName: 'Deploy to Staging'
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: BlueGreenStaging
+        displayName: 'Blue-Green Deployment to Staging'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'spx-options-staging'
+        strategy:
+          runOnce:
+            preDeploy:
+              steps:
+                - script: |
+                    python scripts/feature_flag_manager.py --environment staging --action prepare-deployment
+                  displayName: 'Prepare feature flags for staging'
+                  
+            deploy:
+              steps:
+                # Deploy to Blue environment
+                - task: KubernetesManifest@0
+                  displayName: 'Deploy to Blue environment'
+                  inputs:
+                    action: 'deploy'
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'spx-options-staging'
+                    manifests: |
+                      k8s/staging/deployment-blue.yaml
+                      k8s/staging/service-blue.yaml
+                      k8s/staging/configmap-blue.yaml
+                    containers: '$(containerRegistry)/$(imageName):$(Build.BuildId)'
+
+                # Comprehensive health checks on Blue
+                - script: |
+                    echo "Performing comprehensive health checks on Blue environment..."
+                    python scripts/health_checker.py \
+                      --endpoint http://spx-options-blue-staging.internal \
+                      --tests trading,connectivity,database,redis \
+                      --timeout 300 \
+                      --retry-count 5
+                  displayName: 'Comprehensive Blue environment health check'
+
+                # Warm up Blue environment
+                - script: |
+                    python scripts/warm_up_environment.py --environment staging-blue --duration 120
+                  displayName: 'Warm up Blue environment'
+
+                # Switch traffic to Blue (Blue-Green switch)
+                - task: KubernetesManifest@0
+                  displayName: 'Switch traffic to Blue (Blue-Green cutover)'
+                  inputs:
+                    action: 'deploy'
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'spx-options-staging'
+                    manifests: |
+                      k8s/staging/service-main.yaml
+                      k8s/staging/ingress-blue.yaml
+
+                # Monitor for stability period
+                - script: |
+                    python scripts/monitor_deployment.py \
+                      --environment staging \
+                      --duration 300 \
+                      --metrics-endpoint http://prometheus.internal \
+                      --alert-threshold 0.05
+                  displayName: 'Monitor Blue environment stability'
+
+            postRouteTraffic:
+              steps:
+                # Enable staging-specific feature flags
+                - script: |
+                    python scripts/feature_flag_manager.py \
+                      --environment staging \
+                      --action enable \
+                      --flags advanced-algorithms,ml-predictions
+                  displayName: 'Enable staging feature flags'
+
+                # Cleanup old Green environment
+                - task: Kubernetes@1
+                  displayName: 'Cleanup old Green environment'
+                  inputs:
+                    connectionType: 'kubernetesServiceConnection'
+                    kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+                    namespace: 'spx-options-staging'
+                    command: 'delete'
+                    arguments: 'deployment spx-options-green --ignore-not-found=true'
+
+  - stage: DeployProduction
+    displayName: 'Deploy to Production'
+    dependsOn: DeployStaging
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: CanaryProduction
+        displayName: 'Canary Deployment to Production'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'spx-options-production'
+        strategy:
+          runOnce:
+            preDeploy:
+              steps:
+                - script: |
+                    # Pre-production deployment checks
+                    python scripts/pre_prod_checks.py \
+                      --check-market-hours \
+                      --check-trading-volume \
+                      --check-system-load \
+                      --abort-on-high-volatility
+                  displayName: 'Pre-production deployment validation'
+
+            deploy:
+              steps:
+                # Deploy Canary with 5% traffic
+                - task: KubernetesManifest@0
+                  displayName: 'Deploy Canary (5% traffic)'
+                  inputs:
+                    action: 'deploy'
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'spx-options-prod'
+                    manifests: |
+                      k8s/prod/deployment-canary.yaml
+                      k8s/prod/service-canary.yaml
+                      k8s/prod/istio-virtual-service-5.yaml
+                      k8s/prod/istio-destination-rule.yaml
+                    containers: '$(containerRegistry)/$(imageName):$(Build.BuildId)'
+
+                # Monitor Canary at 5% for 10 minutes
+                - script: |
+                    python scripts/canary_monitor.py \
+                      --traffic-percentage 5 \
+                      --duration 600 \
+                      --error-threshold 0.01 \
+                      --latency-threshold-p99 500 \
+                      --business-metrics-check \
+                      --rollback-on-failure
+                  displayName: 'Monitor Canary at 5% (10 minutes)'
+
+                # Gradually increase to 25% traffic
+                - task: KubernetesManifest@0
+                  displayName: 'Increase Canary to 25% traffic'
+                  inputs:
+                    action: 'deploy'
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'spx-options-prod'
+                    manifests: 'k8s/prod/istio-virtual-service-25.yaml'
+
+                # Monitor at 25% for 10 minutes
+                - script: |
+                    python scripts/canary_monitor.py \
+                      --traffic-percentage 25 \
+                      --duration 600 \
+                      --error-threshold 0.005 \
+                      --latency-threshold-p99 400 \
+                      --business-metrics-check \
+                      --rollback-on-failure
+                  displayName: 'Monitor Canary at 25% (10 minutes)'
+
+                # Increase to 50% traffic
+                - task: KubernetesManifest@0
+                  displayName: 'Increase Canary to 50% traffic'
+                  inputs:
+                    action: 'deploy'
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'spx-options-prod'
+                    manifests: 'k8s/prod/istio-virtual-service-50.yaml'
+
+                # Monitor at 50% for 15 minutes
+                - script: |
+                    python scripts/canary_monitor.py \
+                      --traffic-percentage 50 \
+                      --duration 900 \
+                      --error-threshold 0.003 \
+                      --latency-threshold-p99 300 \
+                      --business-metrics-check \
+                      --rollback-on-failure
+                  displayName: 'Monitor Canary at 50% (15 minutes)'
+
+                # Final deployment to 100% if all checks pass
+                - task: KubernetesManifest@0
+                  displayName: 'Complete Canary deployment (100%)'
+                  inputs:
+                    action: 'deploy'
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'spx-options-prod'
+                    manifests: |
+                      k8s/prod/deployment-main.yaml
+                      k8s/prod/istio-virtual-service-100.yaml
+
+            postRouteTraffic:
+              steps:
+                # Gradual Feature Flag Rollout
+                - script: |
+                    python scripts/feature_flag_manager.py \
+                      --environment production \
+                      --action gradual-enable \
+                      --flags advanced-risk-management \
+                      --rollout-percentage 10 \
+                      --monitor-duration 300
+                  displayName: 'Gradual feature flag rollout (10%)'
+
+                - script: |
+                    python scripts/feature_flag_manager.py \
+                      --environment production \
+                      --action increase-rollout \
+                      --flags advanced-risk-management \
+                      --rollout-percentage 50 \
+                      --monitor-duration 600
+                  displayName: 'Increase feature flag rollout (50%)'
+
+                - script: |
+                    python scripts/feature_flag_manager.py \
+                      --environment production \
+                      --action complete-rollout \
+                      --flags advanced-risk-management
+                  displayName: 'Complete feature flag rollout (100%)'
+
+      - job: AutomatedRollback
+        displayName: 'Automated Rollback on Failure'
+        dependsOn: CanaryProduction
+        condition: failed()
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: KubernetesManifest@0
+            displayName: 'Emergency rollback to stable version'
+            inputs:
+              action: 'deploy'
+              kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+              namespace: 'spx-options-prod'
+              manifests: |
+                k8s/prod/istio-virtual-service-rollback.yaml
+                k8s/prod/deployment-rollback.yaml
+
+          - script: |
+              # Disable all new features immediately
+              python scripts/feature_flag_manager.py \
+                --environment production \
+                --action emergency-disable \
+                --flags advanced-risk-management,ml-predictions,advanced-algorithms
+                
+              # Send critical alerts
+              python scripts/alert_manager.py \
+                --severity critical \
+                --message "Production rollback executed due to deployment failure" \
+                --notify-oncall \
+                --create-incident
+            displayName: 'Emergency feature flag disable and alerting'
+
+  - stage: PostDeploymentValidation
+    displayName: 'Post-Deployment Validation & Monitoring'
+    dependsOn: DeployProduction
+    condition: succeeded()
+    jobs:
+      - job: ValidationAndMonitoring
+        displayName: 'Comprehensive post-deployment validation'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              # Comprehensive end-to-end tests
+              python scripts/e2e_production_tests.py \
+                --test-suite trading-workflow \
+                --test-suite risk-management \
+                --test-suite data-pipeline \
+                --environment production \
+                --timeout 1800
+            displayName: 'End-to-end production tests'
+
+          - script: |
+              # Update monitoring dashboards with new version
+              python scripts/update_monitoring.py \
+                --version $(Build.BuildId) \
+                --environment production \
+                --update-grafana-dashboards \
+                --update-prometheus-rules \
+                --create-baseline-metrics
+            displayName: 'Update monitoring and create baselines'
+
+          - script: |
+              # Performance benchmarking
+              python scripts/performance_benchmark.py \
+                --environment production \
+                --duration 300 \
+                --compare-with-baseline \
+                --generate-report
+            displayName: 'Performance benchmarking'
+
+          - script: |
+              # Send deployment success notifications
+              python scripts/notification_manager.py \
+                --event deployment-success \
+                --version $(Build.BuildId) \
+                --environment production \
+                --notify-channels slack,email,teams \
+                --include-metrics-summary
+            displayName: 'Success notifications and reporting'
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathtoPublish: 'deployment-reports/'
+              artifactName: 'deployment-reports-$(Build.BuildId)'
+
+  - stage: ChaosEngineering
+    displayName: 'Chaos Engineering Tests'
+    dependsOn: PostDeploymentValidation
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: ChaosTests
+        displayName: 'Controlled chaos engineering tests'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              # Run controlled chaos experiments
+              python scripts/chaos_engineering.py \
+                --experiment pod-failure \
+                --experiment network-latency \
+                --experiment cpu-stress \
+                --environment production \
+                --duration 300 \
+                --safety-checks-enabled
+            displayName: 'Execute chaos engineering experiments'

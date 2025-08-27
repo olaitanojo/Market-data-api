@@ -1,0 +1,958 @@
+# GitHub Actions Workflow for SPX Options Trading Bot
+# Advanced Deployment Strategies: Blue-Green, Canary, Rolling Updates, Feature Flags, Multi-Environment
+# Complete CI/CD pipeline with zero-downtime deployments
+
+name: 'SPX Options Trading Bot - Advanced CI/CD'
+
+on:
+  push:
+    branches: [main, develop, feature/*]
+  pull_request:
+    branches: [main, develop]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment for deployment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      deployment_strategy:
+        description: 'Deployment strategy to use'
+        required: true
+        default: 'rolling'
+        type: choice
+        options:
+          - rolling
+          - blue-green
+          - canary
+      enable_feature_flags:
+        description: 'Enable feature flags'
+        required: false
+        default: false
+        type: boolean
+      skip_tests:
+        description: 'Skip test execution (emergency only)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: spxoptionsregistry.azurecr.io
+  IMAGE_NAME: spx-options-trading-bot
+  PYTHON_VERSION: '3.11'
+  FEATURE_FLAG_SERVICE: https://feature-flags.spxoptions.com
+  
+  # Environment-specific namespaces
+  DEV_NAMESPACE: spx-options-dev
+  STAGING_NAMESPACE: spx-options-staging
+  PROD_NAMESPACE: spx-options-prod
+
+jobs:
+  # ============================================================================
+  # SETUP AND METADATA
+  # ============================================================================
+  setup:
+    name: 'Setup Build Metadata'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      image-tag: ${{ steps.metadata.outputs.image-tag }}
+      target-env: ${{ steps.metadata.outputs.target-env }}
+      deployment-strategy: ${{ steps.metadata.outputs.deployment-strategy }}
+      should-deploy: ${{ steps.metadata.outputs.should-deploy }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Generate build metadata
+        id: metadata
+        run: |
+          # Generate version
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          else
+            VERSION="${{ github.run_number }}-${GITHUB_SHA::7}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "image-tag=${VERSION}" >> $GITHUB_OUTPUT
+          
+          # Determine target environment
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TARGET_ENV="${{ github.event.inputs.environment }}"
+            DEPLOYMENT_STRATEGY="${{ github.event.inputs.deployment_strategy }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            TARGET_ENV="production"
+            DEPLOYMENT_STRATEGY="canary"
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            TARGET_ENV="staging"
+            DEPLOYMENT_STRATEGY="blue-green"
+          else
+            TARGET_ENV="dev"
+            DEPLOYMENT_STRATEGY="rolling"
+          fi
+          echo "target-env=${TARGET_ENV}" >> $GITHUB_OUTPUT
+          echo "deployment-strategy=${DEPLOYMENT_STRATEGY}" >> $GITHUB_OUTPUT
+          
+          # Determine if should deploy
+          SHOULD_DEPLOY="false"
+          if [[ "${{ github.event_name }}" == "push" && ("${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/develop") ]]; then
+            SHOULD_DEPLOY="true"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            SHOULD_DEPLOY="true"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            SHOULD_DEPLOY="true"
+          fi
+          echo "should-deploy=${SHOULD_DEPLOY}" >> $GITHUB_OUTPUT
+          
+          echo "🚀 Build Version: ${VERSION}"
+          echo "🎯 Target Environment: ${TARGET_ENV}"
+          echo "📦 Deployment Strategy: ${DEPLOYMENT_STRATEGY}"
+          echo "🔄 Should Deploy: ${SHOULD_DEPLOY}"
+
+  # ============================================================================
+  # CODE QUALITY AND SECURITY ANALYSIS
+  # ============================================================================
+  code-quality:
+    name: 'Code Quality Analysis'
+    runs-on: ubuntu-latest
+    needs: setup
+    strategy:
+      matrix:
+        analysis: [lint, security, type-check]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install black flake8 mypy pylint bandit safety
+          
+      - name: Code formatting check (Black)
+        if: matrix.analysis == 'lint'
+        run: |
+          echo "🔍 Checking code formatting..."
+          black --check --diff .
+          
+      - name: Lint with flake8
+        if: matrix.analysis == 'lint'
+        run: |
+          echo "🔍 Running flake8 linting..."
+          flake8 . --max-line-length=88 --extend-ignore=E203,W503 \
+            --statistics --tee --output-file=flake8-report.txt
+            
+      - name: Advanced linting with pylint
+        if: matrix.analysis == 'lint'
+        continue-on-error: true
+        run: |
+          echo "🔍 Running pylint analysis..."
+          pylint --rcfile=.pylintrc src/ --output-format=text:pylint-report.txt,colorized || true
+          
+      - name: Security vulnerability scanning
+        if: matrix.analysis == 'security'
+        run: |
+          echo "🔒 Running security vulnerability scans..."
+          
+          # Safety check for known vulnerabilities
+          safety check --json --output=safety-report.json || true
+          
+          # Bandit security analysis
+          bandit -r . -f json -o bandit-report.json -ll || true
+          bandit -r . -f txt -o bandit-report.txt -ll || true
+          
+      - name: Type checking with mypy
+        if: matrix.analysis == 'type-check'
+        run: |
+          echo "🔍 Running type checking..."
+          mypy . --ignore-missing-imports --strict-optional \
+            --json-report mypy-report --txt-report mypy-txt-report
+          
+      - name: Upload analysis artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: code-quality-${{ matrix.analysis }}-reports
+          path: |
+            *-report.*
+          retention-days: 30
+
+  # ============================================================================
+  # COMPREHENSIVE TESTING
+  # ============================================================================
+  test:
+    name: 'Test Suite'
+    runs-on: ubuntu-latest
+    needs: [setup, code-quality]
+    if: github.event.inputs.skip_tests != 'true'
+    strategy:
+      matrix:
+        test-type: [unit, integration, performance]
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-xdist pytest-mock pytest-asyncio
+          pip install locust pytest-benchmark
+          
+      - name: Run unit tests
+        if: matrix.test-type == 'unit'
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost/testdb
+          TEST_REDIS_URL: redis://localhost:6379
+        run: |
+          echo "🧪 Running unit tests..."
+          python -m pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml:coverage-unit.xml \
+            --cov-report=html:htmlcov-unit \
+            --junitxml=unit-test-results.xml \
+            --maxfail=5 \
+            -n auto \
+            -v
+            
+      - name: Run integration tests
+        if: matrix.test-type == 'integration'
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost/testdb
+          TEST_REDIS_URL: redis://localhost:6379
+        run: |
+          echo "🧪 Running integration tests..."
+          python -m pytest tests/integration/ \
+            --cov=src \
+            --cov-report=xml:coverage-integration.xml \
+            --cov-report=html:htmlcov-integration \
+            --junitxml=integration-test-results.xml \
+            --maxfail=3 \
+            -v
+            
+      - name: Run performance tests
+        if: matrix.test-type == 'performance'
+        run: |
+          echo "🚀 Running performance tests..."
+          
+          # Benchmark critical functions
+          python -m pytest tests/performance/ \
+            --benchmark-json=benchmark-results.json \
+            --benchmark-histogram=benchmark-histogram
+            
+          # Load testing (if locustfile exists)
+          if [ -f "locustfile.py" ]; then
+            locust --headless --users 100 --spawn-rate 10 --run-time 60s \
+              --host http://localhost:8000 --html load-test-report.html || true
+          fi
+          
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results-${{ matrix.test-type }}
+          path: |
+            *test-results.xml
+            coverage-*.xml
+            htmlcov-*
+            benchmark-*.json
+            *-test-report.html
+          retention-days: 30
+          
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: ${{ matrix.test-type }} Tests
+          path: '*test-results.xml'
+          reporter: java-junit
+
+  # ============================================================================
+  # SONARQUBE ANALYSIS
+  # ============================================================================
+  sonar-analysis:
+    name: 'SonarQube Analysis'
+    runs-on: ubuntu-latest
+    needs: [setup, test]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Download test artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: test-results-unit
+          
+      - name: SonarQube Scan
+        uses: sonarqube-quality-gate-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          scanMetadataReportFile: target/sonar/report-task.txt
+          
+      - name: SonarQube Quality Gate
+        uses: sonarqube-quality-gate-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        timeout-minutes: 5
+
+  # ============================================================================
+  # CONTAINER BUILD AND SECURITY SCAN
+  # ============================================================================
+  build:
+    name: 'Build and Scan Container'
+    runs-on: ubuntu-latest
+    needs: [setup, code-quality]
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-url: ${{ steps.build.outputs.image-url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Log in to Azure Container Registry
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+          
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=${{ needs.setup.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            
+      - name: Build and push container image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.multi-stage
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ needs.setup.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.setup.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          
+      - name: Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.setup.outputs.version }}
+          output-file: sbom.spdx.json
+          
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts
+          path: |
+            trivy-results.sarif
+            sbom.spdx.json
+          retention-days: 30
+
+  # ============================================================================
+  # DEPLOYMENT ORCHESTRATION
+  # ============================================================================
+  deploy:
+    name: 'Deploy to ${{ needs.setup.outputs.target-env }}'
+    runs-on: ubuntu-latest
+    needs: [setup, test, build]
+    if: needs.setup.outputs.should-deploy == 'true'
+    environment: 
+      name: ${{ needs.setup.outputs.target-env }}
+      url: https://spx-options-${{ needs.setup.outputs.target-env }}.domain.com
+    concurrency:
+      group: deploy-${{ needs.setup.outputs.target-env }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+          
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          
+      - name: Set up Kubernetes context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: spx-options-k8s-rg
+          cluster-name: spx-options-aks-cluster
+          
+      - name: Pre-deployment validation
+        run: |
+          echo "🔍 Running pre-deployment validations..."
+          
+          # Check if this is production deployment during market hours
+          if [[ "${{ needs.setup.outputs.target-env }}" == "production" ]]; then
+            python scripts/pre_deployment_checks.py \
+              --check-market-hours \
+              --check-system-load \
+              --check-trading-volume \
+              --abort-on-high-volatility
+          fi
+          
+          # Validate Kubernetes cluster connectivity
+          kubectl cluster-info
+          kubectl get nodes
+          
+      - name: Deploy using Rolling Update Strategy
+        if: needs.setup.outputs.deployment-strategy == 'rolling'
+        run: |
+          echo "🔄 Deploying using Rolling Update strategy..."
+          
+          NAMESPACE="${{ needs.setup.outputs.target-env == 'dev' && env.DEV_NAMESPACE || needs.setup.outputs.target-env == 'staging' && env.STAGING_NAMESPACE || env.PROD_NAMESPACE }}"
+          
+          # Update deployment with new image
+          kubectl set image deployment/spx-options-trading-bot \
+            spx-options-trading-bot=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.setup.outputs.version }} \
+            -n $NAMESPACE
+            
+          # Wait for rollout to complete
+          kubectl rollout status deployment/spx-options-trading-bot \
+            -n $NAMESPACE --timeout=600s
+            
+          # Verify deployment
+          python scripts/deployment_verification.py \
+            --environment ${{ needs.setup.outputs.target-env }} \
+            --strategy rolling
+            
+      - name: Deploy using Blue-Green Strategy
+        if: needs.setup.outputs.deployment-strategy == 'blue-green'
+        run: |
+          echo "🔵🟢 Deploying using Blue-Green strategy..."
+          
+          NAMESPACE="${{ needs.setup.outputs.target-env == 'staging' && env.STAGING_NAMESPACE || env.PROD_NAMESPACE }}"
+          
+          # Deploy to blue environment
+          envsubst < k8s/${{ needs.setup.outputs.target-env }}/deployment-blue.yaml | kubectl apply -f -
+          kubectl set image deployment/spx-options-trading-bot-blue \
+            spx-options-trading-bot=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.setup.outputs.version }} \
+            -n $NAMESPACE
+            
+          # Wait for blue deployment
+          kubectl rollout status deployment/spx-options-trading-bot-blue \
+            -n $NAMESPACE --timeout=600s
+            
+          # Health check blue environment
+          python scripts/health_checker.py \
+            --environment ${{ needs.setup.outputs.target-env }}-blue \
+            --timeout 300 \
+            --retry-count 5 \
+            --comprehensive-check
+            
+          # Switch traffic to blue
+          kubectl apply -f k8s/${{ needs.setup.outputs.target-env }}/service-blue-main.yaml
+          
+          # Monitor stability for 2 minutes
+          sleep 120
+          python scripts/monitor_deployment.py \
+            --environment ${{ needs.setup.outputs.target-env }} \
+            --duration 120
+            
+          # Cleanup old green deployment
+          kubectl delete deployment spx-options-trading-bot-green \
+            -n $NAMESPACE --ignore-not-found=true
+            
+      - name: Deploy using Canary Strategy
+        if: needs.setup.outputs.deployment-strategy == 'canary'
+        run: |
+          echo "🐤 Deploying using Canary strategy..."
+          
+          # Canary deployment percentages
+          PERCENTAGES=(10 25 50 100)
+          NAMESPACE=${{ env.PROD_NAMESPACE }}
+          
+          for PERCENTAGE in "${PERCENTAGES[@]}"; do
+            echo "📊 Deploying canary at ${PERCENTAGE}% traffic..."
+            
+            # Deploy canary version
+            envsubst < k8s/prod/deployment-canary.yaml | kubectl apply -f -
+            kubectl set image deployment/spx-options-trading-bot-canary \
+              spx-options-trading-bot=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.setup.outputs.version }} \
+              -n $NAMESPACE
+              
+            # Update Istio virtual service for traffic splitting
+            envsubst < k8s/prod/istio-virtual-service-template.yaml | \
+              sed "s/CANARY_PERCENTAGE/${PERCENTAGE}/g" | \
+              kubectl apply -f -
+              
+            # Monitor canary deployment
+            MONITOR_DURATION=$((PERCENTAGE < 100 ? 600 : 300))
+            python scripts/canary_monitor.py \
+              --traffic-percentage $PERCENTAGE \
+              --duration $MONITOR_DURATION \
+              --error-threshold 0.01 \
+              --latency-threshold-p99 500 \
+              --business-metrics-check \
+              --rollback-on-failure
+              
+            # Wait for approval before next phase (except final)
+            if [[ $PERCENTAGE -lt 100 ]]; then
+              echo "⏳ Canary at ${PERCENTAGE}% is stable. Proceeding to next phase in 30 seconds..."
+              sleep 30
+            fi
+          done
+
+  # ============================================================================
+  # POST-DEPLOYMENT VALIDATION
+  # ============================================================================
+  post-deployment-validation:
+    name: 'Post-Deployment Validation'
+    runs-on: ubuntu-latest
+    needs: [setup, deploy]
+    if: needs.setup.outputs.target-env != 'dev'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: Install testing dependencies
+        run: |
+          pip install pytest requests selenium pytest-html
+          
+      - name: End-to-End Tests
+        env:
+          BASE_URL: https://spx-options-${{ needs.setup.outputs.target-env }}.domain.com
+          TEST_ENVIRONMENT: ${{ needs.setup.outputs.target-env }}
+        run: |
+          echo "🧪 Running end-to-end tests..."
+          python -m pytest tests/e2e/ \
+            --html=e2e-report.html \
+            --self-contained-html \
+            --maxfail=3 \
+            -v
+            
+      - name: Performance Validation
+        run: |
+          echo "🚀 Running performance validation..."
+          python scripts/performance_validation.py \
+            --environment ${{ needs.setup.outputs.target-env }} \
+            --duration 300 \
+            --requests-per-second 100 \
+            --latency-threshold 200ms \
+            --error-threshold 0.01 \
+            --generate-report
+            
+      - name: Security Validation
+        run: |
+          echo "🔒 Running security validation..."
+          python scripts/security_validation.py \
+            --target-url https://spx-options-${{ needs.setup.outputs.target-env }}.domain.com \
+            --scan-type quick \
+            --check-ssl \
+            --check-headers \
+            --generate-report
+            
+      - name: Upload validation reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: post-deployment-validation-reports
+          path: |
+            e2e-report.html
+            performance-validation-report.html
+            security-validation-report.html
+          retention-days: 30
+
+  # ============================================================================
+  # FEATURE FLAG MANAGEMENT
+  # ============================================================================
+  feature-flags:
+    name: 'Manage Feature Flags'
+    runs-on: ubuntu-latest
+    needs: [setup, deploy]
+    if: github.event.inputs.enable_feature_flags == 'true' || needs.setup.outputs.target-env == 'production'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: Install dependencies
+        run: |
+          pip install requests python-json-logger
+          
+      - name: Gradual Feature Flag Rollout
+        env:
+          FEATURE_FLAG_API_KEY: ${{ secrets.FEATURE_FLAG_API_KEY }}
+        run: |
+          echo "🚩 Managing feature flags for ${{ needs.setup.outputs.target-env }}"
+          
+          if [[ "${{ needs.setup.outputs.target-env }}" == "production" ]]; then
+            # Gradual rollout for production
+            python scripts/feature_flag_manager.py \
+              --environment production \
+              --action gradual-enable \
+              --flags advanced-risk-management,ml-predictions \
+              --rollout-percentage 10 \
+              --monitor-duration 600
+              
+            python scripts/feature_flag_manager.py \
+              --environment production \
+              --action increase-rollout \
+              --flags advanced-risk-management,ml-predictions \
+              --rollout-percentage 50 \
+              --monitor-duration 900
+              
+            python scripts/feature_flag_manager.py \
+              --environment production \
+              --action complete-rollout \
+              --flags advanced-risk-management,ml-predictions
+          else
+            # Enable all flags for staging/dev
+            python scripts/feature_flag_manager.py \
+              --environment ${{ needs.setup.outputs.target-env }} \
+              --action enable \
+              --flags advanced-algorithms,ml-predictions,enhanced-ui
+          fi
+
+  # ============================================================================
+  # MONITORING AND ALERTING UPDATE
+  # ============================================================================
+  update-monitoring:
+    name: 'Update Monitoring & Alerting'
+    runs-on: ubuntu-latest
+    needs: [setup, deploy, post-deployment-validation]
+    if: needs.setup.outputs.target-env == 'production'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: Update Grafana dashboards
+        env:
+          GRAFANA_API_KEY: ${{ secrets.GRAFANA_API_KEY }}
+          GRAFANA_URL: ${{ secrets.GRAFANA_URL }}
+        run: |
+          echo "📊 Updating monitoring dashboards..."
+          python scripts/update_monitoring.py \
+            --version ${{ needs.setup.outputs.version }} \
+            --environment ${{ needs.setup.outputs.target-env }} \
+            --update-grafana-dashboards \
+            --update-prometheus-rules \
+            --create-baseline-metrics
+            
+      - name: Update alerting rules
+        env:
+          PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+        run: |
+          echo "🚨 Updating alerting rules..."
+          python scripts/update_alerting_rules.py \
+            --environment ${{ needs.setup.outputs.target-env }} \
+            --version ${{ needs.setup.outputs.version }}
+
+  # ============================================================================
+  # CHAOS ENGINEERING (PRODUCTION ONLY)
+  # ============================================================================
+  chaos-engineering:
+    name: 'Chaos Engineering Tests'
+    runs-on: ubuntu-latest
+    needs: [setup, post-deployment-validation]
+    if: |
+      needs.setup.outputs.target-env == 'production' && 
+      github.event_name == 'workflow_dispatch' &&
+      github.run_number % 10 == 0
+    environment: production-chaos
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          
+      - name: Set up Kubernetes context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: spx-options-k8s-rg
+          cluster-name: spx-options-aks-cluster
+          
+      - name: Execute controlled chaos experiments
+        run: |
+          echo "🌪️ Running controlled chaos engineering experiments..."
+          
+          # Pod failure experiment
+          python scripts/chaos_experiments.py \
+            --experiment pod-failure \
+            --namespace ${{ env.PROD_NAMESPACE }} \
+            --duration 300 \
+            --safety-checks-enabled \
+            --auto-recovery
+            
+          # Network latency experiment
+          python scripts/chaos_experiments.py \
+            --experiment network-latency \
+            --namespace ${{ env.PROD_NAMESPACE }} \
+            --duration 300 \
+            --latency 100ms \
+            --safety-checks-enabled
+            
+          # CPU stress test
+          python scripts/chaos_experiments.py \
+            --experiment cpu-stress \
+            --namespace ${{ env.PROD_NAMESPACE }} \
+            --duration 180 \
+            --cpu-load 70 \
+            --safety-checks-enabled
+
+  # ============================================================================
+  # NOTIFICATION AND REPORTING
+  # ============================================================================
+  notification:
+    name: 'Send Notifications'
+    runs-on: ubuntu-latest
+    needs: [setup, deploy, post-deployment-validation, feature-flags, update-monitoring]
+    if: always()
+    steps:
+      - name: Determine notification status
+        id: status
+        run: |
+          if [[ "${{ needs.deploy.result }}" == "success" && "${{ needs.post-deployment-validation.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "color=good" >> $GITHUB_OUTPUT
+            echo "message=🚀 Deployment completed successfully" >> $GITHUB_OUTPUT
+          elif [[ "${{ needs.deploy.result }}" == "failure" || "${{ needs.post-deployment-validation.result }}" == "failure" ]]; then
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "color=danger" >> $GITHUB_OUTPUT
+            echo "message=❌ Deployment failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=partial" >> $GITHUB_OUTPUT
+            echo "color=warning" >> $GITHUB_OUTPUT
+            echo "message=⚠️ Deployment completed with warnings" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Send Slack notification
+        uses: 8398a7/action-slack@v3
+        if: always()
+        with:
+          status: ${{ steps.status.outputs.status }}
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          fields: |
+            {
+              "repo": true,
+              "message": true,
+              "commit": true,
+              "author": true,
+              "action": true,
+              "eventName": true,
+              "ref": true,
+              "workflow": true
+            }
+          custom_payload: |
+            {
+              "attachments": [
+                {
+                  "color": "${{ steps.status.outputs.color }}",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": "${{ steps.status.outputs.message }}\n*Repository:* ${{ github.repository }}\n*Environment:* ${{ needs.setup.outputs.target-env }}\n*Version:* ${{ needs.setup.outputs.version }}\n*Strategy:* ${{ needs.setup.outputs.deployment-strategy }}"
+                      }
+                    },
+                    {
+                      "type": "actions",
+                      "elements": [
+                        {
+                          "type": "button",
+                          "text": {
+                            "type": "plain_text",
+                            "text": "View Run"
+                          },
+                          "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            
+      - name: Send Microsoft Teams notification
+        uses: aliencube/microsoft-teams-actions@v0.8.0
+        if: always()
+        with:
+          webhook_uri: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          title: SPX Options Trading Bot Deployment
+          summary: ${{ steps.status.outputs.message }}
+          sections: |
+            [
+              {
+                "activityTitle": "Deployment Summary",
+                "facts": [
+                  {
+                    "name": "Status",
+                    "value": "${{ steps.status.outputs.status }}"
+                  },
+                  {
+                    "name": "Environment",
+                    "value": "${{ needs.setup.outputs.target-env }}"
+                  },
+                  {
+                    "name": "Version",
+                    "value": "${{ needs.setup.outputs.version }}"
+                  },
+                  {
+                    "name": "Strategy",
+                    "value": "${{ needs.setup.outputs.deployment-strategy }}"
+                  },
+                  {
+                    "name": "Repository",
+                    "value": "${{ github.repository }}"
+                  }
+                ]
+              }
+            ]
+
+  # ============================================================================
+  # ROLLBACK ON FAILURE
+  # ============================================================================
+  rollback:
+    name: 'Emergency Rollback'
+    runs-on: ubuntu-latest
+    needs: [setup, deploy, post-deployment-validation]
+    if: |
+      failure() && 
+      needs.setup.outputs.target-env == 'production' &&
+      (needs.deploy.result == 'failure' || needs.post-deployment-validation.result == 'failure')
+    environment: production-emergency
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          
+      - name: Set up Kubernetes context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: spx-options-k8s-rg
+          cluster-name: spx-options-aks-cluster
+          
+      - name: Execute emergency rollback
+        run: |
+          echo "🚨 Executing emergency rollback..."
+          
+          # Rollback Kubernetes deployment
+          kubectl rollout undo deployment/spx-options-trading-bot \
+            -n ${{ env.PROD_NAMESPACE }}
+            
+          # Wait for rollback to complete
+          kubectl rollout status deployment/spx-options-trading-bot \
+            -n ${{ env.PROD_NAMESPACE }} --timeout=300s
+            
+      - name: Disable feature flags
+        env:
+          FEATURE_FLAG_API_KEY: ${{ secrets.FEATURE_FLAG_API_KEY }}
+        run: |
+          echo "🚩 Disabling feature flags..."
+          python scripts/feature_flag_manager.py \
+            --environment production \
+            --action emergency-disable \
+            --flags advanced-risk-management,ml-predictions,advanced-algorithms
+            
+      - name: Send critical alerts
+        run: |
+          echo "🚨 Sending critical alerts..."
+          python scripts/alert_manager.py \
+            --severity critical \
+            --message "Production rollback executed for build ${{ github.run_number }}" \
+            --notify-oncall \
+            --create-incident \
+            --page-sre-team
