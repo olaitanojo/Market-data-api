@@ -736,7 +736,7 @@ jobs:
     if: |
       needs.setup.outputs.target-env == 'production' && 
       github.event_name == 'workflow_dispatch' &&
-      (github.run_number % 10) == 0
+      github.run_number % 10 == 0
     environment: production-chaos
     steps:
       - name: Checkout code
