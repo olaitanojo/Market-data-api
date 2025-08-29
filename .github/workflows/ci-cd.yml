@@ -326,14 +326,14 @@ jobs:
           name: test-results-unit
           
       - name: SonarQube Scan
-        uses: sonarqube-quality-gate-action@master
+        uses: sonarqube-quality-gate/github-action@master
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           scanMetadataReportFile: target/sonar/report-task.txt
           
       - name: SonarQube Quality Gate
-        uses: sonarqube-quality-gate-action@master
+        uses: sonarqube-quality-gate/github-action@master
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         timeout-minutes: 5
@@ -736,7 +736,7 @@ jobs:
     if: |
       needs.setup.outputs.target-env == 'production' && 
       github.event_name == 'workflow_dispatch' &&
-      github.run_number % 10 == 0
+      (github.run_number % 10) == 0
     environment: production-chaos
     steps:
       - name: Checkout code
